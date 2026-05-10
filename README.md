@@ -28,18 +28,21 @@ O modelo Publish/Subscribe é representado por canais de eventos, nos quais uma 
 ## Estrutura do Projeto
 
 ```text
+docs/
+└── ...
+
+experiments/
+└── ...
+
+monitoring/
+├── grafana/
+├── prometheus/
+└── ...
+
 src/
-├── common/
 ├── p2p/
 └── pubsub/
 
-experiments/
-├── scenarios/
-├── scripts/
-└── results/
+tests/
+└── ...
 
-monitoring/
-├── prometheus/
-└── grafana/
-
-docs/
