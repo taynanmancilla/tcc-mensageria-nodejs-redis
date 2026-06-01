@@ -1,0 +1,12 @@
+{
+  "id": "c1-baseline",
+  "name": "C1 — Baseline",
+  "description": "Cenário de linha de base com taxa baixa e constante de mensagens, um produtor e um consumidor, sem falhas simuladas.",
+  "model": "both",
+  "rate": 10,
+  "duration": 60,
+  "producers": 1,
+  "consumers": 1,
+  "messageSize": 256,
+  "simulateFailure": false
+}

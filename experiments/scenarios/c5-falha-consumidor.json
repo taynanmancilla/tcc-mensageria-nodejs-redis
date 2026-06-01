@@ -1,0 +1,14 @@
+{
+  "id": "c5-falha-consumidor",
+  "name": "C5 — Falha de Consumidor",
+  "description": "Avalia a resiliência dos modelos diante da queda de um consumidor. No P2P, mede reentrega via Redis Streams. No Pub/Sub, mede perda de mensagens.",
+  "model": "both",
+  "rate": 50,
+  "duration": 90,
+  "producers": 1,
+  "consumers": 2,
+  "messageSize": 256,
+  "simulateFailure": true,
+  "failureAt": 30,
+  "failureDuration": 20
+}

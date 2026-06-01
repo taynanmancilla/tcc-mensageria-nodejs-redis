@@ -1,0 +1,12 @@
+{
+  "id": "c2-fila-tarefas",
+  "name": "C2 — Fila de Tarefas",
+  "description": "Distribuição de tarefas entre múltiplos consumidores no modelo P2P. Avalia balanceamento de carga e garantia de entrega única.",
+  "model": "p2p",
+  "rate": 50,
+  "duration": 60,
+  "producers": 1,
+  "consumers": 4,
+  "messageSize": 512,
+  "simulateFailure": false
+}

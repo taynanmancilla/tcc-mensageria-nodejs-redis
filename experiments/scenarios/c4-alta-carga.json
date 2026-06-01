@@ -1,0 +1,12 @@
+{
+  "id": "c4-alta-carga",
+  "name": "C4 — Alta Carga",
+  "description": "Avalia o comportamento dos dois modelos sob alta taxa de mensagens por segundo. Observa degradação de latência e throughput máximo.",
+  "model": "both",
+  "rate": 1000,
+  "duration": 120,
+  "producers": 2,
+  "consumers": 4,
+  "messageSize": 256,
+  "simulateFailure": false
+}

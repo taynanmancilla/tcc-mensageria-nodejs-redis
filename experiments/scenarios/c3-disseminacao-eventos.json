@@ -1,0 +1,12 @@
+{
+  "id": "c3-disseminacao-eventos",
+  "name": "C3 — Disseminação de Eventos",
+  "description": "Entrega de eventos para múltiplos subscribers no modelo Pub/Sub. Avalia latência de fan-out e comportamento com múltiplos assinantes.",
+  "model": "pubsub",
+  "rate": 50,
+  "duration": 60,
+  "publishers": 1,
+  "subscribers": 4,
+  "messageSize": 512,
+  "simulateFailure": false
+}

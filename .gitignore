@@ -1,0 +1,27 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente
+.env
+
+# Resultados de experimentos (gerados em tempo de execução)
+experiments/results/**
+!experiments/results/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# IDEs e editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / compilação
+dist/
+build/
