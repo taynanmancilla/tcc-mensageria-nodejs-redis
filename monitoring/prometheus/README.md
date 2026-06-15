@@ -1,21 +1,36 @@
 # Prometheus — Coleta de Métricas
 
-> Configuração em desenvolvimento.
-
 ## Descrição
 
-O Prometheus será responsável por coletar e armazenar as métricas expostas pelos componentes Node.js via `prom-client`.
+O Prometheus é responsável por coletar e armazenar as métricas expostas pelos componentes Node.js via `prom-client`. É iniciado como um container Docker gerenciado pelo `docker-compose.yml`.
 
-## Configuração Prevista
+## Acesso
 
-- Arquivo de configuração: `monitoring/prometheus/prometheus.yml` (a criar).
-- Scrape interval: a definir.
-- Targets: endpoints `/metrics` dos produtores, consumidores e load-runner.
+- **URL local:** http://localhost:9090
 
-## Métricas Coletadas
+## Configuração
+
+O arquivo de configuração é `monitoring/prometheus/prometheus.yml`.
+
+### Targets configurados
+
+| Job | Target | Status atual |
+|-----|--------|--------------|
+| `prometheus` | `localhost:9090` | Ativo |
+| `nodejs-app` | `host.docker.internal:3001` | **DOWN** (esperado nesta fase) |
+
+> O target `nodejs-app` ficará com status **DOWN** no Prometheus enquanto a aplicação Node.js não implementar o endpoint `/metrics` via `prom-client`. Esse comportamento é esperado e não indica erro de configuração.
+
+## Como subir
+
+```bash
+npm run docker:up
+```
+
+## Métricas Coletadas (previstas)
 
 Consulte [`docs/metricas.md`](../../docs/metricas.md) para a lista completa de métricas planejadas.
 
-## Status
+## Próximo passo
 
-A configuração do Prometheus ainda não foi implementada. O arquivo `prometheus.yml` será criado junto com a configuração do Docker Compose.
+Implementar o endpoint `/metrics` na aplicação Node.js (porta `3001`) usando `prom-client`.

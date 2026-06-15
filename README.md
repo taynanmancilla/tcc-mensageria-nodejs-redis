@@ -76,18 +76,18 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: Estruturação inicial do projeto**
+> **Fase: Camada comum implementada**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
 - [x] Dependências declaradas (`package.json`)
-- [ ] Docker Compose configurado com Redis
-- [ ] Implementação do produtor/consumidor P2P
-- [ ] Implementação do publisher/subscriber Pub/Sub
-- [ ] Implementação do load-runner
-- [ ] Instrumentação com Prometheus
+- [x] Docker Compose configurado com Redis, Prometheus e Grafana
+- [x] `src/common/` — config, conexão Redis e servidor `/metrics` implementados
+- [ ] Implementação do produtor/consumidor P2P (`src/p2p/`)
+- [ ] Implementação do publisher/subscriber Pub/Sub (`src/pubsub/`)
+- [ ] Implementação do load-runner (`src/load-runner/`)
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução dos cenários experimentais
+- [ ] Execução dos cenários experimentais (C1–C5)
 
 ---
 
@@ -118,15 +118,75 @@ npm run docker:up
 npm start
 ```
 
+### Validação da infraestrutura
+
+```bash
+# Verificar containers em execução
+docker ps
+
+# Verificar saúde do Redis
+docker exec -it tcc-redis redis-cli ping
+# Resposta esperada: PONG
+```
+
+| Serviço    | URL                    | Observação                                          |
+|------------|------------------------|-----------------------------------------------------|
+| Prometheus | http://localhost:9090  | Target `nodejs-app` deve aparecer como **UP**       |
+| Grafana    | http://localhost:3000  | Usuário: `admin` / Senha: `admin`                   |
+| Redis      | `localhost:6379`       | Verificar com `redis-cli ping`                      |
+
+---
+
+## Validação — Camada `src/common/`
+
+Com Docker e Node.js em execução, siga os passos abaixo para confirmar que a camada comum está funcionando:
+
+```bash
+# 1. Suba a infraestrutura (Redis, Prometheus, Grafana)
+npm run docker:up
+
+# 2. Copie o .env se ainda não existir
+cp .env.example .env
+
+# 3. Inicie a aplicação
+npm start
+```
+
+**Saída esperada no terminal:**
+
+```
+[metrics] server listening on http://localhost:3001/metrics
+[redis] connected — localhost:6379
+```
+
+**Verificar o endpoint de métricas:**
+
+```bash
+curl http://localhost:3001/metrics
+```
+
+Deve retornar texto no formato Prometheus com métricas padrão do Node.js (process, heap, GC) e as métricas customizadas do TCC (`tcc_message_latency_seconds`, `tcc_messages_sent_total`, etc.).
+
+**Verificar o status no Prometheus:**
+
+1. Acesse http://localhost:9090/targets
+2. O job `nodejs-app` deve aparecer como **UP** (anteriormente ficava DOWN)
+
+**Encerrar:**
+
+```bash
+# Ctrl+C encerra a aplicação e desconecta o Redis
+npm run docker:down
+```
+
 ---
 
 ## Próximos Passos
 
-1. Configurar o `docker-compose.yml` com Redis, Prometheus e Grafana.
-2. Implementar a conexão base com o Redis em `src/common/redis/`.
-3. Implementar o produtor e consumidor P2P (`src/p2p/`).
-4. Implementar o publisher e subscriber Pub/Sub (`src/pubsub/`).
-5. Implementar o load-runner (`src/load-runner/`).
-6. Instrumentar os componentes com `prom-client`.
-7. Executar os cenários C1–C5 e coletar os resultados.
+1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
+2. Implementar o produtor e consumidor P2P (`src/p2p/`).
+3. Implementar o publisher e subscriber Pub/Sub (`src/pubsub/`).
+4. Implementar o load-runner (`src/load-runner/`).
+5. Configurar datasource e dashboards no Grafana.
+6. Executar os cenários C1–C5 e coletar os resultados.
 
