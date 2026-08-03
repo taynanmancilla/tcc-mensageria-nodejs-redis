@@ -76,7 +76,7 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: Protótipo básico validado (Semana 12)**
+> **Fase: C1 Baseline parametrizado (Semana 13)**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
@@ -86,9 +86,10 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 - [x] `src/p2p/` — producer e consumer P2P (Redis Streams) implementados
 - [x] `src/pubsub/` — publisher e subscriber Pub/Sub implementados
 - [x] `src/prototypes/basic.js` — protótipo básico executável (Semana 12)
-- [ ] Implementação do load-runner parametrizado (`src/load-runner/`)
+- [x] `src/load-runner/` — load-runner parametrizado implementado (C1 Baseline)
+- [ ] Cenários C2–C5 (Semanas 13/14)
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução dos cenários experimentais (C1–C5)
+- [ ] Execução completa dos cenários experimentais (C2–C5)
 
 ---
 
@@ -274,12 +275,104 @@ No cenário C4 (alta carga), espera-se que p50 e p99 divirjam significativamente
 
 ---
 
+## Validação — C1 Baseline (Semana 13)
+
+> **Pré-requisito:** não execute `npm start` simultaneamente — o cenário C1 sobe seu próprio servidor de métricas na mesma porta 3001.
+
+```bash
+# 1. Infraestrutura Docker (se ainda não estiver rodando)
+npm run docker:up
+
+# 2. Executar o C1 Baseline
+npm run scenario:c1
+```
+
+**Saída esperada no terminal:**
+
+```
+============================================================
+TCC — C1 — Baseline
+============================================================
+Cenário:     c1-baseline
+Rate:        10 msg/s
+Duration:    60s
+Total msgs:  600 por modelo
+MessageSize: ~256 bytes
+Modelo:      both
+============================================================
+
+[P2P] Iniciando — 600 msgs a 10 msg/s por 60s
+
+[p2p:producer] iniciando — 600 msgs a 10 msg/s
+[p2p:producer] 10% (60/600)
+...
+[p2p:producer] 100% (600/600)
+[p2p:consumer] 10% (60/600)
+...
+[p2p:consumer] 100% (600/600)
+
+[P2P] Concluído — 600 enviadas | 600 recebidas | ~60.XXs
+
+[Pub/Sub] Iniciando — 600 msgs a 10 msg/s por 60s
+...
+[Pub/Sub] Concluído — 600 enviadas | 600 recebidas | ~60.XXs
+
+============================================================
+Resumo
+============================================================
+P2P     | 600 env | 600 rec | perda: 0.0% | ~60.XXs
+Pub/Sub | 600 env | 600 rec | perda: 0.0% | ~60.XXs
+
+Nota: P2P e Pub/Sub executados em sequência (isolamento de modelos).
+
+Métricas:   http://localhost:3001/metrics
+Prometheus: http://localhost:9090/graph
+
+Aguardando Ctrl+C para encerrar...
+```
+
+**Validar métricas via curl** (em outro terminal, com o cenário em execução ou logo após):
+
+```bash
+# Contadores de mensagens enviadas e recebidas
+curl -s http://localhost:3001/metrics | grep "^tcc_messages"
+
+# Buckets de latência do C1
+curl -s http://localhost:3001/metrics | grep 'tcc_message_latency.*c1-baseline'
+```
+
+**Queries PromQL** (http://localhost:9090/graph):
+
+```promql
+# Mensagens enviadas por modelo no C1
+tcc_messages_sent_total{scenario="c1-baseline"}
+
+# Mensagens recebidas por modelo no C1
+tcc_messages_received_total{scenario="c1-baseline"}
+
+# Latência p50 do P2P no C1
+histogram_quantile(0.50, rate(tcc_message_latency_seconds_bucket{model="p2p", scenario="c1-baseline"}[2m]))
+
+# Latência p95 do Pub/Sub no C1
+histogram_quantile(0.95, rate(tcc_message_latency_seconds_bucket{model="pubsub", scenario="c1-baseline"}[2m]))
+
+# Comparação p99 entre os dois modelos
+histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{scenario="c1-baseline"}[2m]))
+```
+
+> Com duração de 60s e scrape a cada 5s, o Prometheus terá ~12 pontos de coleta por modelo. As queries acima retornarão valores reais (não NaN) durante e após a execução, diferentemente do protótipo da Semana 12.
+
+> P2P e Pub/Sub são executados em **sequência** (isolamento intencional de modelos). Nas queries PromQL, filtre sempre pelo label `model` para comparar janelas de tempo distintas.
+
+---
+
 ## Próximos Passos
 
 1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
 2. ~~Implementar o produtor e consumidor P2P (`src/p2p/`).~~ ✓ Concluído
 3. ~~Implementar o publisher e subscriber Pub/Sub (`src/pubsub/`).~~ ✓ Concluído
-4. Implementar o load-runner parametrizado (`src/load-runner/`) com leitura dos cenários C1–C5.
-5. Configurar datasource e dashboards no Grafana.
-6. Executar os cenários C1–C5 e coletar os resultados.
+4. ~~Implementar o load-runner parametrizado (`src/load-runner/`) — C1 Baseline.~~ ✓ Concluído
+5. Implementar cenários C2–C5 no load-runner.
+6. Configurar datasource e dashboards no Grafana.
+7. Executar os cenários C2–C5 e coletar os resultados.
 

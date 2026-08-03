@@ -8,6 +8,9 @@ node_modules/
 experiments/results/**
 !experiments/results/.gitkeep
 
+# Logs de implementação (notas internas de desenvolvimento)
+docs/implementation-log/
+
 # Logs
 *.log
 logs/

@@ -8,6 +8,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "prototype:basic": "node src/prototypes/basic.js",
+    "scenario:c1": "node src/load-runner/run.js c1-baseline",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
