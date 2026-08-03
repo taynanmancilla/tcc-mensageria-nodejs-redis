@@ -76,7 +76,7 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: C1 Baseline parametrizado (Semana 13)**
+> **Fase: C2 Fila de Tarefas (Semana 13)**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
@@ -87,9 +87,12 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 - [x] `src/pubsub/` — publisher e subscriber Pub/Sub implementados
 - [x] `src/prototypes/basic.js` — protótipo básico executável (Semana 12)
 - [x] `src/load-runner/` — load-runner parametrizado implementado (C1 Baseline)
-- [ ] Cenários C2–C5 (Semanas 13/14)
+- [x] C2 — Fila de Tarefas: 4 workers P2P, 3000 msgs a 50 msg/s (Semana 13)
+- [ ] C3 — Disseminação de Eventos: múltiplos subscribers Pub/Sub
+- [ ] C4 — Alta Taxa: múltiplos produtores e maior volume
+- [ ] C5 — Falha de Consumidor: resiliência e reentrega
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução completa dos cenários experimentais (C2–C5)
+- [ ] Execução completa dos cenários experimentais (C3–C5)
 
 ---
 
@@ -366,13 +369,100 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{scenario="c1-ba
 
 ---
 
+## Validação — C2 Fila de Tarefas (Semana 13)
+
+> **Pré-requisito:** não execute `npm start` simultaneamente — o cenário C2 sobe seu próprio servidor de métricas na mesma porta 3001.
+
+```bash
+# 1. Infraestrutura Docker (se ainda não estiver rodando)
+npm run docker:up
+
+# 2. Executar o C2 Fila de Tarefas
+npm run scenario:c2
+```
+
+**Saída esperada no terminal:**
+
+```
+============================================================
+TCC — C2 — Fila de Tarefas
+============================================================
+Cenário:     c2-fila-tarefas
+Rate:        50 msg/s
+Duration:    60s
+Total msgs:  3000 por modelo
+MessageSize: ~512 bytes
+Modelo:      p2p
+Consumers:   4
+============================================================
+
+[P2P] Iniciando — 3000 msgs a 50 msg/s por 60s | 4 workers
+
+[p2p:producer] iniciando — 3000 msgs a 50 msg/s
+[p2p:worker-2] 10% (300/3000)
+[p2p:worker-1] 20% (600/3000)
+...
+[p2p:worker-4] 100% (3000/3000)
+
+[P2P] Concluído — 3000 enviadas | 3000 recebidas | ~60.XXs
+
+============================================================
+Resumo
+============================================================
+P2P     | 3000 env | 3000 rec | perda: 0.0% | ~60.XXs
+         worker-1: ~750 msgs (~25.0%)
+         worker-2: ~750 msgs (~25.0%)
+         worker-3: ~750 msgs (~25.0%)
+         worker-4: ~750 msgs (~25.0%)
+
+Nota: P2P e Pub/Sub executados em sequência (isolamento de modelos).
+
+Métricas:   http://localhost:3001/metrics
+Prometheus: http://localhost:9090/graph
+
+Aguardando Ctrl+C para encerrar...
+```
+
+> A distribuição entre workers pode variar por corrida. Em Redis Streams com consumer groups, cada mensagem é entregue ao consumer que executa XREADGROUP e está disponível no momento — não há garantia de round-robin estrito pelo protocolo. O ponto central do C2 é confirmar que as 3000 mensagens foram processadas sem perda e sem duplicação, independente de como foram distribuídas entre os workers.
+
+**Validar métricas via curl** (em outro terminal, com o cenário em execução):
+
+```bash
+# Total enviadas e recebidas no C2
+curl -s http://localhost:3001/metrics | grep 'tcc_messages.*c2-fila-tarefas'
+```
+
+**Queries PromQL** (http://localhost:9090/graph):
+
+```promql
+# Total enviado pelo produtor no C2
+tcc_messages_sent_total{scenario="c2-fila-tarefas"}
+
+# Total recebido pelos 4 workers no C2 (sem label worker — agregado)
+tcc_messages_received_total{scenario="c2-fila-tarefas"}
+
+# Latência p50 do P2P no C2
+histogram_quantile(0.50, rate(tcc_message_latency_seconds_bucket{model="p2p", scenario="c2-fila-tarefas"}[2m]))
+
+# Latência p95 do P2P no C2
+histogram_quantile(0.95, rate(tcc_message_latency_seconds_bucket{model="p2p", scenario="c2-fila-tarefas"}[2m]))
+
+# Comparação de latência p99 entre C1 e C2 (ambos P2P)
+histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="p2p"}[2m]))
+```
+
+> As métricas de latência são coletadas por worker na aplicação, mas emitidas sem label de worker — label `scenario="c2-fila-tarefas"` agrega todos os 4 workers. Isso permite comparar C1 vs C2 via `scenario` sem fragmentar o histograma por worker.
+
+---
+
 ## Próximos Passos
 
 1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
 2. ~~Implementar o produtor e consumidor P2P (`src/p2p/`).~~ ✓ Concluído
 3. ~~Implementar o publisher e subscriber Pub/Sub (`src/pubsub/`).~~ ✓ Concluído
 4. ~~Implementar o load-runner parametrizado (`src/load-runner/`) — C1 Baseline.~~ ✓ Concluído
-5. Implementar cenários C2–C5 no load-runner.
-6. Configurar datasource e dashboards no Grafana.
-7. Executar os cenários C2–C5 e coletar os resultados.
+5. ~~Implementar C2 — Fila de Tarefas no load-runner.~~ ✓ Concluído
+6. Implementar cenários C3–C5 no load-runner.
+7. Configurar datasource e dashboards no Grafana.
+8. Executar os cenários C3–C5 e coletar os resultados.
 
