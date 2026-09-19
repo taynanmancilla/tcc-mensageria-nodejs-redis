@@ -76,7 +76,7 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: C3 Disseminação de Eventos (Semana 14)**
+> **Fase: C4 Alta Carga (Semana 15)**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
@@ -89,10 +89,10 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 - [x] `src/load-runner/` — load-runner parametrizado implementado (C1 Baseline)
 - [x] C2 — Fila de Tarefas: 4 workers P2P, 3000 msgs a 50 msg/s (Semana 13)
 - [x] C3 — Disseminação de Eventos: 4 subscribers Pub/Sub, fan-out, 3000 msgs a 50 msg/s (Semana 14)
-- [ ] C4 — Alta Taxa: múltiplos produtores e maior volume
+- [x] C4 — Alta Carga: 2 producers/publishers, 4 consumers P2P, 1000 msg/s agregado, 120000 msgs (Semana 15)
 - [ ] C5 — Falha de Consumidor: resiliência e reentrega
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução completa dos cenários experimentais (C4–C5)
+- [ ] Execução completa dos cenários experimentais (C5)
 
 ---
 
@@ -540,6 +540,98 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="pubsub"}
 
 ---
 
+## Validação — C4 Alta Carga (Semana 15)
+
+> **Pré-requisito:** não execute `npm start` simultaneamente — o cenário C4 sobe seu próprio servidor de métricas na mesma porta 3001.
+
+```bash
+# 1. Infraestrutura Docker (se ainda não estiver rodando)
+npm run docker:up
+
+# 2. Executar o C4 Alta Carga
+npm run scenario:c4
+```
+
+**Saída esperada no terminal:**
+
+```
+============================================================
+TCC — C4 — Alta Carga
+============================================================
+Cenário:     c4-alta-carga
+Rate:        1000 msg/s
+Duration:    120s
+Total msgs:  120000 por modelo
+MessageSize: ~256 bytes
+Modelo:      both
+Consumers:   4
+============================================================
+
+[P2P] Iniciando — 120000 msgs a 1000 msg/s por 120s | 2 producers → 4 workers
+...
+[P2P] Concluído — 120000 enviadas | 120000 recebidas | ~12X.XXs
+
+[Pub/Sub] Iniciando — 120000 msgs a 1000 msg/s por 120s | 2 publishers → 1 subscriber
+...
+[Pub/Sub] Concluído — 120000 enviadas | 120000 recebidas | ~12X.XXs
+
+============================================================
+Resumo
+============================================================
+P2P     | 120000 env | 120000 rec | perda: 0.0% | ~12X.XXs
+         producer-1: 60000 msgs
+         producer-2: 60000 msgs
+         worker-1: ~30000 msgs (~25.0%)
+         worker-2: ~30000 msgs (~25.0%)
+         worker-3: ~30000 msgs (~25.0%)
+         worker-4: ~30000 msgs (~25.0%)
+Pub/Sub | 120000 env | 120000 rec | perda: 0.0% | ~12X.XXs
+         publisher-1: 60000 msgs
+         publisher-2: 60000 msgs
+
+Métricas:   http://localhost:3001/metrics
+Prometheus: http://localhost:9090/graph
+
+Aguardando Ctrl+C para encerrar...
+```
+
+> **`rate` é sempre a taxa TOTAL agregada do cenário, nunca por unidade emissora.** Em C4, `rate: 1000` e `producers: 2` significam 1000 msg/s no total, divididos estaticamente entre os 2 producers (P2P) / publishers (Pub/Sub) — cada um emitindo ~500 msg/s e ~60000 mensagens (metade de `totalMessages = rate × duration = 120000`). Essa semântica é a mesma usada em C1–C3 (`rate` nunca mudou de significado entre cenários com números diferentes de unidades paralelas) e evita que `totalMessages` precise ser recalculado com base no número de producers.
+
+> **Pub/Sub no C4 usa 1 subscriber, não 4.** O JSON de `c4-alta-carga` declara `consumers: 4` (usado pelo lado P2P, como em C2) mas **não** declara um campo `subscribers` — diferente de C3, que introduziu esse campo explicitamente para testar fan-out. Por isso, `runPubSub()` usa o valor padrão (`scenario.subscribers ?? 1` = 1) e o C4 Pub/Sub processa `120000 enviadas / 120000 recebidas`, sem multiplicação por fan-out. Essa foi uma decisão metodológica deliberada: o C3 já validou o comportamento de fan-out com múltiplos subscribers: reintroduzi-lo aqui misturaria duas variáveis (alta carga + fan-out) no mesmo cenário, dificultando isolar o efeito de cada uma.
+
+**Validar métricas via curl** (em outro terminal, com o cenário em execução):
+
+```bash
+# Contadores de mensagens enviadas e recebidas para os dois modelos no C4
+curl -s http://localhost:3001/metrics | grep 'tcc_messages.*c4-alta-carga'
+
+# Confirmar 120000 observações de latência para cada modelo
+curl -s http://localhost:3001/metrics | grep 'tcc_message_latency_seconds_count.*c4-alta-carga'
+```
+
+**Queries PromQL** (http://localhost:9090/graph, consultadas **durante** a execução para evitar `NaN` — ver nota na seção de validação do C2):
+
+```promql
+# Enviado/recebido por modelo no C4 (esperado: 120000/120000 para ambos)
+tcc_messages_sent_total{scenario="c4-alta-carga"}
+tcc_messages_received_total{scenario="c4-alta-carga"}
+
+# Latência p50 do P2P no C4
+histogram_quantile(0.50, rate(tcc_message_latency_seconds_bucket{model="p2p", scenario="c4-alta-carga"}[2m]))
+
+# Latência p99 do P2P no C4 — espera-se degradação visível frente ao C1/C2 sob 1000 msg/s
+histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="p2p", scenario="c4-alta-carga"}[2m]))
+
+# Comparação p99 entre P2P e Pub/Sub sob alta carga
+histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{scenario="c4-alta-carga"}[2m]))
+```
+
+> Nenhum label `producer`/`publisher`/`worker`/`subscriber` foi adicionado nas métricas — mesma disciplina de C2/C3. A distribuição por producer/publisher/worker é exibida apenas no terminal.
+
+> **Sem batch sending nesta implementação.** O `rateTicker` (`src/load-runner/rate.js`) não foi alterado — cada producer/publisher em C4 emite a ~500 msg/s usando o mesmo mecanismo de `setTimeout` já validado em C1–C3. Se a validação empírica mostrar degradação relevante na taxa efetiva (tempo decorrido muito acima de 120s, ou throughput real abaixo do esperado), isso deve ser reportado como limitação conhecida — a introdução de batch sending exigiria alterar `rate.js`/`producer.js`/`publisher.js`, fora do escopo desta etapa.
+
+---
+
 ## Próximos Passos
 
 1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
@@ -548,7 +640,8 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="pubsub"}
 4. ~~Implementar o load-runner parametrizado (`src/load-runner/`) — C1 Baseline.~~ ✓ Concluído
 5. ~~Implementar C2 — Fila de Tarefas no load-runner.~~ ✓ Concluído
 6. ~~Implementar C3 — Disseminação de Eventos no load-runner.~~ ✓ Concluído
-7. Implementar cenários C4 (Alta Carga) e C5 (Falha de Consumidor) no load-runner.
-8. Configurar datasource e dashboards no Grafana.
-9. Executar os cenários C4–C5 e coletar os resultados.
+7. ~~Implementar C4 — Alta Carga no load-runner (múltiplos producers/publishers).~~ ✓ Concluído
+8. Implementar C5 — Falha de Consumidor no load-runner (resiliência e reentrega).
+9. Configurar datasource e dashboards no Grafana.
+10. Executar o cenário C5 e coletar os resultados.
 

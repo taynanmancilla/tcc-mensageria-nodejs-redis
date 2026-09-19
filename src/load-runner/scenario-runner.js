@@ -7,6 +7,13 @@ import { setupGroup, consume } from '../p2p/consumer.js';
 import { publish } from '../pubsub/publisher.js';
 import { subscribe } from '../pubsub/subscriber.js';
 
+// Divides `total` into `n` integer parts, distributing the remainder across the first parts.
+function splitLoad(total, n) {
+  const base = Math.floor(total / n);
+  const remainder = total % n;
+  return Array.from({ length: n }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
 export async function runScenario(scenarioId) {
   const raw = readFileSync(`experiments/scenarios/${scenarioId}.json`, 'utf-8');
   const scenario = JSON.parse(raw);
@@ -51,18 +58,20 @@ export async function runScenario(scenarioId) {
 async function runP2P(client, scenario, { totalMessages, timeoutMs }) {
   const { id, rate, duration, messageSize } = scenario;
   const numConsumers = scenario.consumers ?? 1;
+  const numProducers = scenario.producers ?? 1;
   const stream = `tcc:p2p:${id}`;
   const group  = `${id}-group`;
 
   const workerLabel = numConsumers === 1 ? '1 worker' : `${numConsumers} workers`;
-  console.log(`\n[P2P] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${workerLabel}`);
+  const producerPrefix = numProducers > 1 ? `${numProducers} producers → ` : '';
+  console.log(`\n[P2P] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${producerPrefix}${workerLabel}`);
   const wallStart = Date.now();
 
   await client.del(stream);
   await setupGroup(client, stream, group);
 
-  if (numConsumers === 1) {
-    // Single-consumer path — delegates entirely to consume() (C1 behavior preserved)
+  if (numConsumers === 1 && numProducers === 1) {
+    // Single-producer, single-consumer path — delegates entirely to produce()/consume() (C1 behavior preserved)
     const [sentP2P, receivedP2P] = await Promise.all([
       produce(client, stream, totalMessages, { rate, scenario: id, messageSize }),
       consume(client, stream, group, 'worker-1', totalMessages, { scenario: id, timeoutMs }),
@@ -74,31 +83,56 @@ async function runP2P(client, scenario, { totalMessages, timeoutMs }) {
     return { sent: sentP2P, received: receivedP2P, elapsed };
   }
 
-  // Multi-consumer path — sharedState coordinates when all workers stop.
+  // Producer side — static split across N producers, no coordination needed
+  // (unlike consumers, producers never compete for the same messages).
+  let producerNames = null;
+  let producerTasks;
+  if (numProducers === 1) {
+    producerTasks = [produce(client, stream, totalMessages, { rate, scenario: id, messageSize })];
+  } else {
+    producerNames = Array.from({ length: numProducers }, (_, i) => `producer-${i + 1}`);
+    const producerCounts = splitLoad(totalMessages, numProducers);
+    const producerRate = rate / numProducers;
+    producerTasks = producerNames.map((name, i) =>
+      runProducer(client, stream, producerCounts[i], producerRate, id, messageSize),
+    );
+  }
+
+  // Consumer side — sharedState coordinates when all workers stop (C2 behavior preserved).
   // JavaScript is single-threaded: increments inside the synchronous inner loop
   // are safe without locks — no other coroutine can interleave mid-increment.
-  const workerNames  = Array.from({ length: numConsumers }, (_, i) => `worker-${i + 1}`);
-  const sharedState  = { total: 0, target: totalMessages };
-  const logEvery     = Math.max(1, Math.floor(totalMessages / 10));
-
-  const [sentP2P, ...workerCounts] = await Promise.all([
-    produce(client, stream, totalMessages, { rate, scenario: id, messageSize }),
-    ...workerNames.map(name =>
+  let workerNames = null;
+  let consumerTasks;
+  if (numConsumers === 1) {
+    consumerTasks = [consume(client, stream, group, 'worker-1', totalMessages, { scenario: id, timeoutMs })];
+  } else {
+    workerNames = Array.from({ length: numConsumers }, (_, i) => `worker-${i + 1}`);
+    const sharedState = { total: 0, target: totalMessages };
+    const logEvery = Math.max(1, Math.floor(totalMessages / 10));
+    consumerTasks = workerNames.map(name =>
       runWorker(client, stream, group, name, id, sharedState, logEvery, timeoutMs),
-    ),
+    );
+  }
+
+  const [producerCounts, consumerCounts] = await Promise.all([
+    Promise.all(producerTasks),
+    Promise.all(consumerTasks),
   ]);
 
-  const receivedP2P = workerCounts.reduce((sum, n) => sum + n, 0);
+  const sentP2P = producerCounts.reduce((sum, n) => sum + n, 0);
+  const receivedP2P = consumerCounts.reduce((sum, n) => sum + n, 0);
   const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
 
   console.log(`[P2P] Concluído — ${sentP2P} enviadas | ${receivedP2P} recebidas | ${elapsed}s`);
 
-  return {
-    sent:     sentP2P,
-    received: receivedP2P,
-    elapsed,
-    workers:  Object.fromEntries(workerNames.map((name, i) => [name, workerCounts[i]])),
-  };
+  const result = { sent: sentP2P, received: receivedP2P, elapsed };
+  if (producerNames) {
+    result.producers = Object.fromEntries(producerNames.map((name, i) => [name, producerCounts[i]]));
+  }
+  if (workerNames) {
+    result.workers = Object.fromEntries(workerNames.map((name, i) => [name, consumerCounts[i]]));
+  }
+  return result;
 }
 
 // Worker coroutine for multi-consumer P2P.
@@ -155,17 +189,33 @@ async function runWorker(client, streamName, groupName, workerName, scenario, sh
   return received;
 }
 
+// Producer coroutine for multi-producer P2P.
+// Each producer gets a static, non-overlapping slice of totalMessages — no
+// coordination needed between producers, unlike the shared-target consumer side.
+async function runProducer(client, streamName, count, rate, scenario, messageSize) {
+  const producerClient = client.duplicate();
+  await producerClient.connect();
+
+  try {
+    return await produce(producerClient, streamName, count, { rate, scenario, messageSize });
+  } finally {
+    await producerClient.quit();
+  }
+}
+
 async function runPubSub(client, scenario, { totalMessages, timeoutMs }) {
   const { id, rate, duration, messageSize } = scenario;
   const numSubscribers = scenario.subscribers ?? 1;
+  const numPublishers = scenario.producers ?? 1;
   const channel = `tcc:pubsub:${id}`;
 
   const subLabel = numSubscribers === 1 ? '1 subscriber' : `${numSubscribers} subscribers`;
-  console.log(`\n[Pub/Sub] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${subLabel}`);
+  const publisherPrefix = numPublishers > 1 ? `${numPublishers} publishers → ` : '';
+  console.log(`\n[Pub/Sub] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${publisherPrefix}${subLabel}`);
   const wallStart = Date.now();
 
-  if (numSubscribers === 1) {
-    // Single-subscriber path — delegates entirely to subscribe()/publish() (C1 behavior preserved)
+  if (numSubscribers === 1 && numPublishers === 1) {
+    // Single-publisher, single-subscriber path — delegates entirely to subscribe()/publish() (C1 behavior preserved)
     const { done, unsubscribe } = await subscribe(client, channel, totalMessages, { scenario: id, timeoutMs });
     const sentPubSub = await publish(client, channel, totalMessages, { rate, scenario: id, messageSize });
     const receivedPubSub = await done;
@@ -177,31 +227,71 @@ async function runPubSub(client, scenario, { totalMessages, timeoutMs }) {
     return { sent: sentPubSub, received: receivedPubSub, elapsed };
   }
 
-  // Multi-subscriber path — fan-out: each subscriber is an independent connection
-  // that receives every published message (no competition, unlike P2P consumer groups).
-  const subscriberNames = Array.from({ length: numSubscribers }, (_, i) => `subscriber-${i + 1}`);
+  // Subscriber side — 1 or many (fan-out, C3 behavior preserved when numSubscribers > 1).
+  // subscribe() only resolves after Redis confirms the SUBSCRIBE — safe to publish
+  // only after every subscriber (1 or many) is ready, regardless of publisher count.
+  let subscriberNames = null;
+  let subs;
+  if (numSubscribers === 1) {
+    subs = [await subscribe(client, channel, totalMessages, { scenario: id, timeoutMs })];
+  } else {
+    subscriberNames = Array.from({ length: numSubscribers }, (_, i) => `subscriber-${i + 1}`);
+    subs = await Promise.all(
+      subscriberNames.map(() => subscribe(client, channel, totalMessages, { scenario: id, timeoutMs })),
+    );
+  }
 
-  const subs = await Promise.all(
-    subscriberNames.map(() => subscribe(client, channel, totalMessages, { scenario: id, timeoutMs })),
-  );
-  // subscribe() only resolves after Redis confirms the SUBSCRIBE — safe to publish now.
+  // Publisher side — static split across N publishers, no coordination needed
+  // (mirrors the P2P producer side — publishers never compete for the same messages).
+  let publisherNames = null;
+  let publisherTasks;
+  if (numPublishers === 1) {
+    publisherTasks = [publish(client, channel, totalMessages, { rate, scenario: id, messageSize })];
+  } else {
+    publisherNames = Array.from({ length: numPublishers }, (_, i) => `publisher-${i + 1}`);
+    const publisherCounts = splitLoad(totalMessages, numPublishers);
+    const publisherRate = rate / numPublishers;
+    publisherTasks = publisherNames.map((name, i) =>
+      runPublisher(client, channel, publisherCounts[i], publisherRate, id, messageSize),
+    );
+  }
 
-  const sentPubSub = await publish(client, channel, totalMessages, { rate, scenario: id, messageSize });
-  const receivedCounts = await Promise.all(subs.map((s) => s.done));
+  const [publisherCounts, receivedCounts] = await Promise.all([
+    Promise.all(publisherTasks),
+    Promise.all(subs.map((s) => s.done)),
+  ]);
   await Promise.all(subs.map((s) => s.unsubscribe()));
 
+  const sentPubSub = publisherCounts.reduce((sum, n) => sum + n, 0);
   const receivedPubSub = receivedCounts.reduce((sum, n) => sum + n, 0);
   const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
 
-  console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas (agregado) | ${elapsed}s`);
+  const aggregateSuffix = subscriberNames ? ' (agregado)' : '';
+  console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas${aggregateSuffix} | ${elapsed}s`);
 
-  return {
-    sent: sentPubSub,
-    received: receivedPubSub,
-    elapsed,
-    subscribers: Object.fromEntries(subscriberNames.map((name, i) => [name, receivedCounts[i]])),
-    expectedPerSubscriber: totalMessages,
-  };
+  const result = { sent: sentPubSub, received: receivedPubSub, elapsed };
+  if (publisherNames) {
+    result.publishers = Object.fromEntries(publisherNames.map((name, i) => [name, publisherCounts[i]]));
+  }
+  if (subscriberNames) {
+    result.subscribers = Object.fromEntries(subscriberNames.map((name, i) => [name, receivedCounts[i]]));
+    result.expectedPerSubscriber = totalMessages;
+  }
+  return result;
+}
+
+// Publisher coroutine for multi-publisher Pub/Sub.
+// Each publisher gets a static, non-overlapping slice of totalMessages — no
+// coordination needed between publishers, mirroring the P2P producer side.
+async function runPublisher(client, channel, count, rate, scenario, messageSize) {
+  const publisherClient = client.duplicate();
+  await publisherClient.connect();
+
+  try {
+    return await publish(publisherClient, channel, count, { rate, scenario, messageSize });
+  } finally {
+    await publisherClient.quit();
+  }
 }
 
 function printSummary(results) {
@@ -219,6 +309,16 @@ function printSummary(results) {
       const numSubscribers = Object.keys(r.subscribers).length;
       console.log(`${label} | ${r.sent} env | ${r.received} rec (agregado, ${numSubscribers} subscribers × ${r.expectedPerSubscriber} esperado) | ${r.elapsed}s`);
 
+      if (r.producers) {
+        for (const [name, count] of Object.entries(r.producers)) {
+          console.log(`         ${name}: ${count} msgs`);
+        }
+      }
+      if (r.publishers) {
+        for (const [name, count] of Object.entries(r.publishers)) {
+          console.log(`         ${name}: ${count} msgs`);
+        }
+      }
       for (const [name, count] of Object.entries(r.subscribers)) {
         const pct = r.expectedPerSubscriber > 0 ? ((count / r.expectedPerSubscriber) * 100).toFixed(1) : '0.0';
         console.log(`         ${name}: ${count}/${r.expectedPerSubscriber} msgs (${pct}%)`);
@@ -229,6 +329,16 @@ function printSummary(results) {
     const loss = (((r.sent - r.received) / r.sent) * 100).toFixed(1);
     console.log(`${label} | ${r.sent} env | ${r.received} rec | perda: ${loss}% | ${r.elapsed}s`);
 
+    if (r.producers) {
+      for (const [name, count] of Object.entries(r.producers)) {
+        console.log(`         ${name}: ${count} msgs`);
+      }
+    }
+    if (r.publishers) {
+      for (const [name, count] of Object.entries(r.publishers)) {
+        console.log(`         ${name}: ${count} msgs`);
+      }
+    }
     if (r.workers) {
       for (const [worker, count] of Object.entries(r.workers)) {
         const pct = r.received > 0 ? ((count / r.received) * 100).toFixed(1) : '0.0';
