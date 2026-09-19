@@ -26,6 +26,7 @@ export async function runScenario(scenarioId) {
   console.log(`MessageSize: ~${messageSize} bytes`);
   console.log(`Modelo:      ${model}`);
   if ((scenario.consumers ?? 1) > 1) console.log(`Consumers:   ${scenario.consumers}`);
+  if ((scenario.subscribers ?? 1) > 1) console.log(`Subscribers: ${scenario.subscribers}`);
   console.log(sep);
 
   const server = startMetricsServer();
@@ -156,20 +157,51 @@ async function runWorker(client, streamName, groupName, workerName, scenario, sh
 
 async function runPubSub(client, scenario, { totalMessages, timeoutMs }) {
   const { id, rate, duration, messageSize } = scenario;
+  const numSubscribers = scenario.subscribers ?? 1;
   const channel = `tcc:pubsub:${id}`;
 
-  console.log(`\n[Pub/Sub] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s`);
+  const subLabel = numSubscribers === 1 ? '1 subscriber' : `${numSubscribers} subscribers`;
+  console.log(`\n[Pub/Sub] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${subLabel}`);
   const wallStart = Date.now();
 
-  const { done, unsubscribe } = await subscribe(client, channel, totalMessages, { scenario: id, timeoutMs });
+  if (numSubscribers === 1) {
+    // Single-subscriber path — delegates entirely to subscribe()/publish() (C1 behavior preserved)
+    const { done, unsubscribe } = await subscribe(client, channel, totalMessages, { scenario: id, timeoutMs });
+    const sentPubSub = await publish(client, channel, totalMessages, { rate, scenario: id, messageSize });
+    const receivedPubSub = await done;
+    await unsubscribe();
+
+    const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
+    console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas | ${elapsed}s`);
+
+    return { sent: sentPubSub, received: receivedPubSub, elapsed };
+  }
+
+  // Multi-subscriber path — fan-out: each subscriber is an independent connection
+  // that receives every published message (no competition, unlike P2P consumer groups).
+  const subscriberNames = Array.from({ length: numSubscribers }, (_, i) => `subscriber-${i + 1}`);
+
+  const subs = await Promise.all(
+    subscriberNames.map(() => subscribe(client, channel, totalMessages, { scenario: id, timeoutMs })),
+  );
+  // subscribe() only resolves after Redis confirms the SUBSCRIBE — safe to publish now.
+
   const sentPubSub = await publish(client, channel, totalMessages, { rate, scenario: id, messageSize });
-  const receivedPubSub = await done;
-  await unsubscribe();
+  const receivedCounts = await Promise.all(subs.map((s) => s.done));
+  await Promise.all(subs.map((s) => s.unsubscribe()));
 
+  const receivedPubSub = receivedCounts.reduce((sum, n) => sum + n, 0);
   const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
-  console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas | ${elapsed}s`);
 
-  return { sent: sentPubSub, received: receivedPubSub, elapsed };
+  console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas (agregado) | ${elapsed}s`);
+
+  return {
+    sent: sentPubSub,
+    received: receivedPubSub,
+    elapsed,
+    subscribers: Object.fromEntries(subscriberNames.map((name, i) => [name, receivedCounts[i]])),
+    expectedPerSubscriber: totalMessages,
+  };
 }
 
 function printSummary(results) {
@@ -180,7 +212,21 @@ function printSummary(results) {
 
   for (const [model, r] of Object.entries(results)) {
     const label = model === 'p2p' ? 'P2P    ' : 'Pub/Sub';
-    const loss  = (((r.sent - r.received) / r.sent) * 100).toFixed(1);
+
+    if (r.subscribers) {
+      // Fan-out (Pub/Sub, múltiplos subscribers): received agregado = sent × subscribers por design.
+      // "Perda" não se aplica ao agregado aqui — cada subscriber é avaliado contra o total publicado.
+      const numSubscribers = Object.keys(r.subscribers).length;
+      console.log(`${label} | ${r.sent} env | ${r.received} rec (agregado, ${numSubscribers} subscribers × ${r.expectedPerSubscriber} esperado) | ${r.elapsed}s`);
+
+      for (const [name, count] of Object.entries(r.subscribers)) {
+        const pct = r.expectedPerSubscriber > 0 ? ((count / r.expectedPerSubscriber) * 100).toFixed(1) : '0.0';
+        console.log(`         ${name}: ${count}/${r.expectedPerSubscriber} msgs (${pct}%)`);
+      }
+      continue;
+    }
+
+    const loss = (((r.sent - r.received) / r.sent) * 100).toFixed(1);
     console.log(`${label} | ${r.sent} env | ${r.received} rec | perda: ${loss}% | ${r.elapsed}s`);
 
     if (r.workers) {

@@ -76,7 +76,7 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: C2 Fila de Tarefas (Semana 13)**
+> **Fase: C3 Disseminação de Eventos (Semana 14)**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
@@ -88,11 +88,11 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 - [x] `src/prototypes/basic.js` — protótipo básico executável (Semana 12)
 - [x] `src/load-runner/` — load-runner parametrizado implementado (C1 Baseline)
 - [x] C2 — Fila de Tarefas: 4 workers P2P, 3000 msgs a 50 msg/s (Semana 13)
-- [ ] C3 — Disseminação de Eventos: múltiplos subscribers Pub/Sub
+- [x] C3 — Disseminação de Eventos: 4 subscribers Pub/Sub, fan-out, 3000 msgs a 50 msg/s (Semana 14)
 - [ ] C4 — Alta Taxa: múltiplos produtores e maior volume
 - [ ] C5 — Falha de Consumidor: resiliência e reentrega
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução completa dos cenários experimentais (C3–C5)
+- [ ] Execução completa dos cenários experimentais (C4–C5)
 
 ---
 
@@ -455,6 +455,91 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="p2p"}[2m
 
 ---
 
+## Validação — C3 Disseminação de Eventos (Semana 14)
+
+> **Pré-requisito:** não execute `npm start` simultaneamente — o cenário C3 sobe seu próprio servidor de métricas na mesma porta 3001.
+
+```bash
+# 1. Infraestrutura Docker (se ainda não estiver rodando)
+npm run docker:up
+
+# 2. Executar o C3 Disseminação de Eventos
+npm run scenario:c3
+```
+
+**Saída esperada no terminal:**
+
+```
+============================================================
+TCC — C3 — Disseminação de Eventos
+============================================================
+Cenário:     c3-disseminacao-eventos
+Rate:        50 msg/s
+Duration:    60s
+Total msgs:  3000 por modelo
+MessageSize: ~512 bytes
+Modelo:      pubsub
+Subscribers: 4
+============================================================
+
+[Pub/Sub] Iniciando — 3000 msgs a 50 msg/s por 60s | 4 subscribers
+
+[pubsub:publisher] iniciando — 3000 msgs a 50 msg/s
+...
+[pubsub:publisher] 100% (3000/3000)
+
+[Pub/Sub] Concluído — 3000 enviadas | 12000 recebidas (agregado) | ~60.XXs
+
+============================================================
+Resumo
+============================================================
+Pub/Sub | 3000 env | 12000 rec (agregado, 4 subscribers × 3000 esperado) | ~60.XXs
+         subscriber-1: 3000/3000 msgs (100.0%)
+         subscriber-2: 3000/3000 msgs (100.0%)
+         subscriber-3: 3000/3000 msgs (100.0%)
+         subscriber-4: 3000/3000 msgs (100.0%)
+
+Métricas:   http://localhost:3001/metrics
+Prometheus: http://localhost:9090/graph
+
+Aguardando Ctrl+C para encerrar...
+```
+
+> **Por que `received_total` chega a 12000 enquanto `sent_total` é 3000?** No modelo Pub/Sub, cada mensagem publicada é entregue a **todos** os subscribers ativos (fan-out), diferente do P2P, onde as mensagens são distribuídas entre consumidores concorrentes (soma = total enviado). Em C3, com 4 subscribers, cada um recebe a cópia completa das 3000 mensagens, totalizando `3000 × 4 = 12000` entregas. **`received > sent` é o comportamento esperado e correto neste cenário**, não uma perda negativa nem uma duplicação indevida. Por isso, a métrica de "perda" só faz sentido calculada por subscriber (`recebido / 3000`), nunca como `(sent - received_agregado) / sent`.
+
+**Validar métricas via curl** (em outro terminal, com o cenário em execução):
+
+```bash
+# Total publicado e total recebido (agregado, 4 subscribers) no C3
+curl -s http://localhost:3001/metrics | grep 'tcc_messages.*c3-disseminacao-eventos'
+
+# Confirmar 12000 observações de latência (uma por entrega, não por publicação)
+curl -s http://localhost:3001/metrics | grep 'tcc_message_latency_seconds_count.*c3-disseminacao-eventos'
+```
+
+**Queries PromQL** (http://localhost:9090/graph):
+
+```promql
+# Total enviado pelo publisher no C3 (esperado: 3000)
+tcc_messages_sent_total{scenario="c3-disseminacao-eventos"}
+
+# Total recebido agregado no C3 (esperado: 12000 = 3000 × 4 subscribers)
+tcc_messages_received_total{scenario="c3-disseminacao-eventos"}
+
+# Latência p50 do Pub/Sub no C3
+histogram_quantile(0.50, rate(tcc_message_latency_seconds_bucket{model="pubsub", scenario="c3-disseminacao-eventos"}[2m]))
+
+# Latência p95 do Pub/Sub no C3
+histogram_quantile(0.95, rate(tcc_message_latency_seconds_bucket{model="pubsub", scenario="c3-disseminacao-eventos"}[2m]))
+
+# Comparação de latência p99 entre C1 e C3 (ambos Pub/Sub)
+histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="pubsub"}[2m]))
+```
+
+> Assim como em C2, a distribuição por subscriber é exibida apenas no terminal — as métricas do Prometheus permanecem apenas com os labels `model` e `scenario`, sem label `subscriber`, para manter consistência metodológica com C2 (sem label `worker`) e evitar explosão de cardinalidade de séries.
+
+---
+
 ## Próximos Passos
 
 1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
@@ -462,7 +547,8 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{model="p2p"}[2m
 3. ~~Implementar o publisher e subscriber Pub/Sub (`src/pubsub/`).~~ ✓ Concluído
 4. ~~Implementar o load-runner parametrizado (`src/load-runner/`) — C1 Baseline.~~ ✓ Concluído
 5. ~~Implementar C2 — Fila de Tarefas no load-runner.~~ ✓ Concluído
-6. Implementar cenários C3–C5 no load-runner.
-7. Configurar datasource e dashboards no Grafana.
-8. Executar os cenários C3–C5 e coletar os resultados.
+6. ~~Implementar C3 — Disseminação de Eventos no load-runner.~~ ✓ Concluído
+7. Implementar cenários C4 (Alta Carga) e C5 (Falha de Consumidor) no load-runner.
+8. Configurar datasource e dashboards no Grafana.
+9. Executar os cenários C4–C5 e coletar os resultados.
 
