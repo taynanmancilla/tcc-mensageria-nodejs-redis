@@ -1,6 +1,6 @@
 # Arquitetura do Experimento
 
-> Documento em elaboração — descreve a arquitetura planejada para o TCC.
+Documento conceitual que descreve a arquitetura do experimento implementada e validada nos cenários C1–C5.
 
 ## Visão Geral
 
@@ -25,19 +25,19 @@ Camada de mensageria central. Provê:
 
 ### Script de Carga (`load-runner`)
 
-Componente Node.js customizado responsável por injetar carga controlada no sistema. Permite definir taxa de mensagens por segundo, duração do experimento e cenário a ser executado.
+Componente Node.js customizado que injeta carga controlada no sistema, rodando localmente (fora do Docker Compose). Lê o cenário a partir de `experiments/scenarios/*.json`, define taxa de mensagens por segundo, duração do experimento e cenário a ser executado, e expõe o endpoint `/metrics` na porta `3001`. Detalhes em [`docs/ferramenta-carga.md`](ferramenta-carga.md).
 
 ### Coletor de Métricas (`prom-client`)
 
-Biblioteca integrada aos produtores e consumidores para expor métricas no formato Prometheus (latência, throughput, contadores de erro, etc.).
+Biblioteca integrada ao load-runner para expor métricas no formato Prometheus (latência, throughput, contadores de confiabilidade). Detalhes em [`docs/metricas.md`](metricas.md).
 
 ### Prometheus
 
-Servidor de coleta e armazenamento de métricas. Realiza scraping periódico dos endpoints expostos pelos componentes Node.js.
+Servidor de coleta e armazenamento de métricas, executado via Docker Compose. Realiza scraping periódico do endpoint `/metrics` exposto pelo processo Node.js — o target `nodejs-app` aparece como UP sempre que esse processo está em execução.
 
 ### Grafana
 
-Interface de visualização das métricas coletadas pelo Prometheus. Permite a criação de dashboards comparativos entre os dois modelos.
+Interface de visualização das métricas coletadas pelo Prometheus, executado via Docker Compose. A criação de dashboards comparativos entre os dois modelos ainda é uma pendência (ver [`README.md`](../README.md), seção "Próximos Passos").
 
 ## Diagrama Simplificado
 
@@ -60,5 +60,6 @@ Interface de visualização das métricas coletadas pelo Prometheus. Permite a c
 
 ## Observações
 
-- Todos os componentes serão executados via Docker Compose.
-- A arquitetura será detalhada à medida que a implementação avançar.
+- Redis, Prometheus e Grafana são executados via Docker Compose (`docker-compose.yml`, `npm run docker:up`).
+- O processo Node.js (protótipo ou qualquer cenário `scenario:c1`–`c5`) roda localmente, fora do Docker Compose, e expõe `/metrics` na porta `3001` para ser raspado pelo Prometheus.
+- A implementação e validação dos cenários C1–C5 estão documentadas no [`README.md`](../README.md) principal e nos registros locais de `docs/implementation-log/`.
