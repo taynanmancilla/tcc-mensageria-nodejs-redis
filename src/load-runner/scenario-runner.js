@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { connect, getClient } from '../common/redis.js';
-import { startMetricsServer, messageLatency, messagesReceived } from '../common/metrics.js';
+import { startMetricsServer, messageLatency, messagesReceived, messagesRedelivered } from '../common/metrics.js';
 import { produce } from '../p2p/producer.js';
 import { setupGroup, consume } from '../p2p/consumer.js';
 import { publish } from '../pubsub/publisher.js';
@@ -101,26 +101,49 @@ async function runP2P(client, scenario, { totalMessages, timeoutMs }) {
   // Consumer side — sharedState coordinates when all workers stop (C2 behavior preserved).
   // JavaScript is single-threaded: increments inside the synchronous inner loop
   // are safe without locks — no other coroutine can interleave mid-increment.
+  const simulateFailure = scenario.simulateFailure === true;
   let workerNames = null;
   let consumerTasks;
+  let recoveryTask = Promise.resolve(0);
+
   if (numConsumers === 1) {
     consumerTasks = [consume(client, stream, group, 'worker-1', totalMessages, { scenario: id, timeoutMs })];
   } else {
     workerNames = Array.from({ length: numConsumers }, (_, i) => `worker-${i + 1}`);
     const sharedState = { total: 0, target: totalMessages };
     const logEvery = Math.max(1, Math.floor(totalMessages / 10));
-    consumerTasks = workerNames.map(name =>
-      runWorker(client, stream, group, name, id, sharedState, logEvery, timeoutMs),
-    );
+
+    if (simulateFailure) {
+      // C5: worker-1 is deliberately crashed mid-batch (after XREADGROUP, before XACK)
+      // leaving pending entries in the group's PEL. worker-2+ keep consuming normally
+      // via the unmodified runWorker() — the shared sharedState object is what lets
+      // them notice the recovery sweep's contribution and stop at the right count,
+      // with no changes needed to runWorker() itself.
+      const failAtMs = wallStart + scenario.failureAt * 1000;
+      const recoverAtMs = wallStart + (scenario.failureAt + scenario.failureDuration) * 1000;
+
+      consumerTasks = [
+        runFailingWorker(client, stream, group, workerNames[0], id, sharedState, logEvery, timeoutMs, failAtMs),
+        ...workerNames.slice(1).map(name =>
+          runWorker(client, stream, group, name, id, sharedState, logEvery, timeoutMs),
+        ),
+      ];
+      recoveryTask = recoverPendingMessages(client, stream, group, workerNames[1], id, sharedState, recoverAtMs);
+    } else {
+      consumerTasks = workerNames.map(name =>
+        runWorker(client, stream, group, name, id, sharedState, logEvery, timeoutMs),
+      );
+    }
   }
 
-  const [producerCounts, consumerCounts] = await Promise.all([
+  const [producerCounts, consumerCounts, recoveredCount] = await Promise.all([
     Promise.all(producerTasks),
     Promise.all(consumerTasks),
+    recoveryTask,
   ]);
 
   const sentP2P = producerCounts.reduce((sum, n) => sum + n, 0);
-  const receivedP2P = consumerCounts.reduce((sum, n) => sum + n, 0);
+  const receivedP2P = consumerCounts.reduce((sum, n) => sum + n, 0) + recoveredCount;
   const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
 
   console.log(`[P2P] Concluído — ${sentP2P} enviadas | ${receivedP2P} recebidas | ${elapsed}s`);
@@ -131,6 +154,13 @@ async function runP2P(client, scenario, { totalMessages, timeoutMs }) {
   }
   if (workerNames) {
     result.workers = Object.fromEntries(workerNames.map((name, i) => [name, consumerCounts[i]]));
+  }
+  if (simulateFailure) {
+    const pendingSummary = await client.xPending(stream, group);
+    result.redelivered = recoveredCount;
+    result.lost = 0;
+    result.pendingFinal = pendingSummary.pending;
+    result.recoveredMessages = recoveredCount;
   }
   return result;
 }
@@ -187,6 +217,119 @@ async function runWorker(client, streamName, groupName, workerName, scenario, sh
   }
 
   return received;
+}
+
+// Failing worker coroutine for C5 (simulateFailure). Reads a batch via XREADGROUP
+// exactly like runWorker(), but once failAtMs has passed, abandons that batch
+// without ACKing it — leaving it pending in the group's PEL — and disconnects,
+// simulating a crash mid-processing. Never increments messagesReceived/latency
+// for the abandoned batch: those messages only count once recovered.
+async function runFailingWorker(client, streamName, groupName, workerName, scenario, sharedState, logEvery, timeoutMs, failAtMs) {
+  const workerClient = client.duplicate();
+  await workerClient.connect();
+
+  const deadline = Date.now() + timeoutMs;
+  let received = 0;
+
+  try {
+    while (sharedState.total < sharedState.target) {
+      if (Date.now() > deadline) {
+        console.warn(`[p2p:${workerName}] timeout — ${received} mensagens recebidas`);
+        break;
+      }
+
+      const results = await workerClient.xReadGroup(
+        groupName,
+        workerName,
+        [{ key: streamName, id: '>' }],
+        { COUNT: 10, BLOCK: 1000 },
+      );
+
+      if (!results) continue;
+
+      if (Date.now() >= failAtMs) {
+        const abandoned = results.reduce((sum, { messages }) => sum + messages.length, 0);
+        console.warn(`[p2p:${workerName}] falha simulada — abandonando lote de ${abandoned} mensagens sem XACK`);
+        break;
+      }
+
+      for (const { messages } of results) {
+        for (const { id, message } of messages) {
+          const data = JSON.parse(message.payload);
+          const latencySeconds = (performance.now() - data.timestamp) / 1000;
+
+          messageLatency.observe({ model: 'p2p', scenario }, latencySeconds);
+          messagesReceived.inc({ model: 'p2p', scenario });
+          await workerClient.xAck(streamName, groupName, id);
+
+          received++;
+          sharedState.total++;
+
+          if (sharedState.total % logEvery === 0 || sharedState.total === sharedState.target) {
+            console.log(`[p2p:${workerName}] ${Math.round((sharedState.total / sharedState.target) * 100)}% (${sharedState.total}/${sharedState.target})`);
+          }
+
+          if (sharedState.total >= sharedState.target) break;
+        }
+        if (sharedState.total >= sharedState.target) break;
+      }
+    }
+  } finally {
+    await workerClient.quit();
+  }
+
+  console.log(`[p2p:${workerName}] encerrado após falha simulada — ${received} mensagens processadas antes da queda`);
+
+  return received;
+}
+
+// One-shot recovery sweep for C5. Waits until the failure window has passed, then
+// reclaims whatever runFailingWorker() left pending in the PEL via XAUTOCLAIM,
+// reassigning it to a healthy worker's consumer identity and ACKing it. A single
+// sweep is enough — the abandoned batch is bounded by XREADGROUP's own COUNT (10),
+// never by the full failure window's message volume (unlike Pub/Sub's loss).
+async function recoverPendingMessages(client, streamName, groupName, recoveryConsumer, scenario, sharedState, recoverAtMs) {
+  const recoveryClient = client.duplicate();
+  await recoveryClient.connect();
+
+  const waitMs = recoverAtMs - Date.now();
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  let recovered = 0;
+
+  try {
+    // minIdleTime=1000ms: the abandoned batch has been idle since failAtMs (tens of
+    // seconds by the time this sweep runs), while messages actively being read and
+    // ACKed by a healthy worker are idle for only single-digit milliseconds — 1s is
+    // a safe, simple threshold that can't accidentally reclaim in-flight messages.
+    const { messages } = await recoveryClient.xAutoClaim(
+      streamName, groupName, recoveryConsumer, 1000, '0-0', { COUNT: 100 },
+    );
+
+    for (const entry of messages) {
+      if (!entry) continue; // tombstoned entry (deleted from the stream) — nothing to recover
+
+      const { id, message } = entry;
+      const data = JSON.parse(message.payload);
+      const latencySeconds = (performance.now() - data.timestamp) / 1000;
+
+      messageLatency.observe({ model: 'p2p', scenario }, latencySeconds);
+      messagesReceived.inc({ model: 'p2p', scenario });
+      messagesRedelivered.inc({ model: 'p2p', scenario });
+      await recoveryClient.xAck(streamName, groupName, id);
+
+      recovered++;
+      sharedState.total++;
+    }
+  } finally {
+    await recoveryClient.quit();
+  }
+
+  console.log(`[p2p:recovery] ${recovered} mensagens recuperadas via XAUTOCLAIM`);
+
+  return recovered;
 }
 
 // Producer coroutine for multi-producer P2P.
@@ -327,7 +470,12 @@ function printSummary(results) {
     }
 
     const loss = (((r.sent - r.received) / r.sent) * 100).toFixed(1);
-    console.log(`${label} | ${r.sent} env | ${r.received} rec | perda: ${loss}% | ${r.elapsed}s`);
+    // C5 (simulateFailure): surface redelivered/pendingFinal alongside the usual loss
+    // line — "perda" stays the sent-vs-received discrepancy check, unrelated to lost.
+    const failureSuffix = r.redelivered !== undefined
+      ? ` | redelivered: ${r.redelivered} | pendingFinal: ${r.pendingFinal}`
+      : '';
+    console.log(`${label} | ${r.sent} env | ${r.received} rec | perda: ${loss}%${failureSuffix} | ${r.elapsed}s`);
 
     if (r.producers) {
       for (const [name, count] of Object.entries(r.producers)) {
@@ -344,6 +492,9 @@ function printSummary(results) {
         const pct = r.received > 0 ? ((count / r.received) * 100).toFixed(1) : '0.0';
         console.log(`         ${worker}: ${count} msgs (${pct}%)`);
       }
+    }
+    if (r.recoveredMessages) {
+      console.log(`         recuperadas via XAUTOCLAIM: ${r.recoveredMessages}`);
     }
   }
 
