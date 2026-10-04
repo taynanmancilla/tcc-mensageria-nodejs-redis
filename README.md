@@ -76,7 +76,7 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 
 ## Status Atual
 
-> **Fase: C4 Alta Carga (Semana 15)**
+> **Fase: C1–C5 implementados e validados (Semana 16) — próxima etapa: consolidação de resultados**
 
 - [x] Estrutura de pastas definida
 - [x] Documentação inicial criada
@@ -90,9 +90,9 @@ Consulte [`docs/ferramenta-carga.md`](docs/ferramenta-carga.md) para a justifica
 - [x] C2 — Fila de Tarefas: 4 workers P2P, 3000 msgs a 50 msg/s (Semana 13)
 - [x] C3 — Disseminação de Eventos: 4 subscribers Pub/Sub, fan-out, 3000 msgs a 50 msg/s (Semana 14)
 - [x] C4 — Alta Carga: 2 producers/publishers, 4 consumers P2P, 1000 msg/s agregado, 120000 msgs (Semana 15)
-- [ ] C5 — Falha de Consumidor: resiliência e reentrega
+- [x] C5 — Falha de Consumidor: falha simulada P2P (PEL + XAUTOCLAIM) e Pub/Sub (perda medida via counters), 4500 msgs (Semana 16)
 - [ ] Configuração de dashboards no Grafana
-- [ ] Execução completa dos cenários experimentais (C5)
+- [ ] Consolidação de resultados e análise comparativa para o TCC
 
 ---
 
@@ -632,6 +632,89 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{scenario="c4-al
 
 ---
 
+## Validação — C5 Falha de Consumidor (Semana 16)
+
+> **Pré-requisito:** não execute `npm start` simultaneamente — o cenário C5 sobe seu próprio servidor de métricas na mesma porta 3001.
+
+```bash
+# 1. Infraestrutura Docker (se ainda não estiver rodando)
+npm run docker:up
+
+# 2. Executar o C5 Falha de Consumidor
+npm run scenario:c5
+```
+
+**Objetivo:** avaliar a diferença de comportamento entre P2P (Redis Streams) e Pub/Sub (Redis Pub/Sub) diante da falha temporária de um consumidor/subscriber. Uma falha é simulada entre `failureAt=30s` e `failureAt+failureDuration=50s` (janela de 30s–50s) durante uma execução de `rate=50 msg/s` por `duration=90s` (`totalMessages = 4500` por modelo).
+
+**Resultado observado — P2P:**
+
+```
+P2P     | 4500 env | 4500 rec | perda: 0.0% | redelivered: 1 | pendingFinal: 0 | 93.81s
+         worker-1: 720 msgs (16.0%)
+         worker-2: 3779 msgs (84.0%)
+         recuperadas via XAUTOCLAIM: 1
+```
+
+`worker-1` é deliberadamente interrompido logo após ler um lote via `XREADGROUP`, sem confirmar via `XACK` — essa(s) mensagem(ns) ficam pendentes no PEL (Pending Entries List) do consumer group. Após a janela de falha, uma varredura única via `XAUTOCLAIM` reatribui e confirma essas mensagens em nome de `worker-2`, incrementando `tcc_messages_redelivered_total`. Ao final, `XPENDING` confirma **0 mensagens pendentes** (`pendingFinal`) — recuperação completa, sem perda.
+
+> **Por que `redelivered` é pequeno (1), não ~1000?** Diferente do Pub/Sub, no P2P apenas **um** dos dois workers falha — o stream continua sendo um pool compartilhado, e o worker saudável (`worker-2`) segue consumindo normalmente mensagens novas durante toda a janela de falha. O que fica pendente é só o lote que `worker-1` tinha em mãos no instante exato da queda (limitado pelo `COUNT` do `XREADGROUP`, não pela duração da janela de falha). **Não espere `redelivered` próximo de `rate × failureDuration`** — essa conta só se aplica à perda do Pub/Sub, não à reentrega do P2P.
+
+**Resultado observado — Pub/Sub:**
+
+```
+Pub/Sub | 4500 env | 3540 rec | perda: 21.3% | lost: 960 | redelivered: 0 | 93.88s
+         falha simulada: 30s–50s
+         antes da falha: 1439 msgs recebidas
+         após reconexão: 2101 msgs recebidas
+```
+
+O subscriber único é desconectado em `failureAt=30s` e reconectado em `failureAt+failureDuration=50s`. O publisher continua publicando normalmente durante toda a janela — como o Redis Pub/Sub não tem persistência nem reentrega, as mensagens publicadas enquanto o subscriber está offline são **perdidas permanentemente** para ele. `lost` é medido como a diferença do contador `tcc_messages_sent_total` entre o instante da desconexão e o da reconexão (`sentAtReconnect - sentAtDisconnect`), não por uma estimativa fixa — confirma-se que `received + lost = sent` (`3540 + 960 = 4500`).
+
+> **Por que `lost=960`, não exatamente `1000`?** `960` está próximo de `rate × failureDuration = 50 × 20 = 1000`, mas não precisa ser exatamente esse valor — há variação real de timing no event loop (mesma categoria de variação já documentada em C1–C4). O valor usado na métrica é sempre o medido ao vivo via contadores, nunca a estimativa analítica.
+
+**O que o C5 demonstra — diferença metodológica central entre os modelos:**
+
+| | P2P / Redis Streams | Pub/Sub / Redis Pub/Sub |
+|---|---|---|
+| O que acontece com mensagens em trânsito na falha | Ficam pendentes no PEL (persistidas) | São descartadas (sem persistência) |
+| Após a falha | Recuperáveis via `XCLAIM`/`XAUTOCLAIM` | Perdidas para sempre |
+| Resultado final | `received = sent` (0% perda real) | `received < sent` (perda real) |
+| Métrica incrementada | `tcc_messages_redelivered_total` | `tcc_messages_lost_total` |
+
+**Validar métricas via curl** (em outro terminal, com o cenário em execução):
+
+```bash
+curl -s http://localhost:3001/metrics | grep 'tcc_messages.*c5-falha-consumidor'
+```
+
+Valores confirmados nesta validação:
+```
+tcc_messages_sent_total{model="p2p",scenario="c5-falha-consumidor"} 4500
+tcc_messages_sent_total{model="pubsub",scenario="c5-falha-consumidor"} 4500
+tcc_messages_received_total{model="p2p",scenario="c5-falha-consumidor"} 4500
+tcc_messages_received_total{model="pubsub",scenario="c5-falha-consumidor"} 3540
+tcc_messages_redelivered_total{model="p2p",scenario="c5-falha-consumidor"} 1
+tcc_messages_lost_total{model="pubsub",scenario="c5-falha-consumidor"} 960
+```
+
+**Queries PromQL** (http://localhost:9090/graph, consultadas **durante** a execução para evitar `NaN` — ver nota na seção de validação do C2):
+
+```promql
+# Reentregas no P2P do C5 (esperado: pequeno, > 0)
+tcc_messages_redelivered_total{scenario="c5-falha-consumidor"}
+
+# Perdas no Pub/Sub do C5 (esperado: próximo de rate × failureDuration)
+tcc_messages_lost_total{scenario="c5-falha-consumidor"}
+
+# Enviadas vs recebidas por modelo no C5
+tcc_messages_sent_total{scenario="c5-falha-consumidor"}
+tcc_messages_received_total{scenario="c5-falha-consumidor"}
+```
+
+> Nenhum label `worker`/`subscriber` foi adicionado nas métricas — mesma disciplina de C2–C4. A distribuição por worker e o detalhamento da janela de falha são exibidos apenas no terminal.
+
+---
+
 ## Próximos Passos
 
 1. ~~Implementar a configuração central e conexão Redis em `src/common/`.~~ ✓ Concluído
@@ -641,7 +724,8 @@ histogram_quantile(0.99, rate(tcc_message_latency_seconds_bucket{scenario="c4-al
 5. ~~Implementar C2 — Fila de Tarefas no load-runner.~~ ✓ Concluído
 6. ~~Implementar C3 — Disseminação de Eventos no load-runner.~~ ✓ Concluído
 7. ~~Implementar C4 — Alta Carga no load-runner (múltiplos producers/publishers).~~ ✓ Concluído
-8. Implementar C5 — Falha de Consumidor no load-runner (resiliência e reentrega).
-9. Configurar datasource e dashboards no Grafana.
-10. Executar o cenário C5 e coletar os resultados.
+8. ~~Implementar C5 — Falha de Consumidor no load-runner (P2P com PEL/XAUTOCLAIM, Pub/Sub com perda medida via counters).~~ ✓ Concluído
+9. Criar o implementation-log da Semana 16.
+10. Configurar datasource e dashboards no Grafana.
+11. Consolidar os resultados de C1–C5 e redigir a análise comparativa P2P vs. Pub/Sub para o TCC.
 
