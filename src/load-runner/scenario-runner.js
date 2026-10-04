@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { connect, getClient } from '../common/redis.js';
-import { startMetricsServer, messageLatency, messagesReceived, messagesRedelivered } from '../common/metrics.js';
+import { startMetricsServer, messageLatency, messagesReceived, messagesRedelivered, messagesSent, messagesLost } from '../common/metrics.js';
 import { produce } from '../p2p/producer.js';
 import { setupGroup, consume } from '../p2p/consumer.js';
 import { publish } from '../pubsub/publisher.js';
@@ -12,6 +12,18 @@ function splitLoad(total, n) {
   const base = Math.floor(total / n);
   const remainder = total % n;
   return Array.from({ length: n }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
+// Reads the current value of a Prometheus counter for a specific label combination,
+// without resetting or mutating it — used by C5 to observe sent/received progress
+// mid-run (e.g. around a simulated failure window) without needing subscribe()/
+// publish() to expose any new return value.
+async function readCounterValue(counter, labels) {
+  const data = await counter.get();
+  const entry = data.values.find((v) =>
+    Object.keys(labels).every((key) => v.labels[key] === labels[key]),
+  );
+  return entry ? entry.value : 0;
 }
 
 export async function runScenario(scenarioId) {
@@ -351,11 +363,19 @@ async function runPubSub(client, scenario, { totalMessages, timeoutMs }) {
   const numSubscribers = scenario.subscribers ?? 1;
   const numPublishers = scenario.producers ?? 1;
   const channel = `tcc:pubsub:${id}`;
+  const simulateFailure = scenario.simulateFailure === true;
 
   const subLabel = numSubscribers === 1 ? '1 subscriber' : `${numSubscribers} subscribers`;
   const publisherPrefix = numPublishers > 1 ? `${numPublishers} publishers → ` : '';
   console.log(`\n[Pub/Sub] Iniciando — ${totalMessages} msgs a ${rate} msg/s por ${duration}s | ${publisherPrefix}${subLabel}`);
   const wallStart = Date.now();
+
+  if (simulateFailure) {
+    // C5: dedicated path — a single subscriber is deliberately disconnected for
+    // failureDuration seconds. C1/C3/C4 never set simulateFailure, so they never
+    // reach this branch and the paths below remain completely unaffected.
+    return runPubSubWithFailure(client, scenario, { totalMessages, timeoutMs, channel, wallStart });
+  }
 
   if (numSubscribers === 1 && numPublishers === 1) {
     // Single-publisher, single-subscriber path — delegates entirely to subscribe()/publish() (C1 behavior preserved)
@@ -423,6 +443,68 @@ async function runPubSub(client, scenario, { totalMessages, timeoutMs }) {
   return result;
 }
 
+// C5 (simulateFailure) Pub/Sub path: a single subscriber is forcibly disconnected
+// for failureDuration seconds, while the publisher keeps publishing uninterrupted.
+// Messages published during that window are permanently lost — Pub/Sub has no
+// persistence and no redelivery, unlike the P2P/Streams side of C5.
+//
+// `lost` is measured as the delta of the live tcc_messages_sent_total counter
+// between disconnect and reconnect (readCounterValue), not assumed from
+// rate × failureDuration — subscribe()/publish() expose no API for in-progress
+// counts, so reading the already-exported Prometheus counters directly is how
+// this avoids touching subscriber.js/publisher.js.
+async function runPubSubWithFailure(client, scenario, { totalMessages, timeoutMs, channel, wallStart }) {
+  const { id, rate, messageSize } = scenario;
+  const failAtMs = wallStart + scenario.failureAt * 1000;
+  const recoverAtMs = wallStart + (scenario.failureAt + scenario.failureDuration) * 1000;
+
+  // Phase 1: subscribe before publish starts (same ordering guarantee as C1/C3/C4).
+  // We never await its `done` — we deliberately disconnect before expectedCount.
+  const first = await subscribe(client, channel, totalMessages, { scenario: id, timeoutMs });
+  const sentPromise = publish(client, channel, totalMessages, { rate, scenario: id, messageSize });
+
+  const toFailMs = failAtMs - Date.now();
+  if (toFailMs > 0) await new Promise((resolve) => setTimeout(resolve, toFailMs));
+
+  const sentAtDisconnect = await readCounterValue(messagesSent, { model: 'pubsub', scenario: id });
+  const receivedBeforeFailure = await readCounterValue(messagesReceived, { model: 'pubsub', scenario: id });
+  await first.unsubscribe();
+  console.warn(`[pubsub:subscriber] falha simulada — desconectado em ${scenario.failureAt}s (${receivedBeforeFailure} recebidas até aqui)`);
+
+  const toRecoverMs = recoverAtMs - Date.now();
+  if (toRecoverMs > 0) await new Promise((resolve) => setTimeout(resolve, toRecoverMs));
+
+  const sentAtReconnect = await readCounterValue(messagesSent, { model: 'pubsub', scenario: id });
+  const lost = Math.max(0, sentAtReconnect - sentAtDisconnect);
+  messagesLost.inc({ model: 'pubsub', scenario: id }, lost);
+  console.warn(`[pubsub:subscriber] reconectando em ${scenario.failureAt + scenario.failureDuration}s — ${lost} mensagens perdidas durante a falha`);
+
+  // Phase 2: fresh subscriber, expecting only what's left to be published from here on.
+  const remainingAfterReconnect = Math.max(0, totalMessages - sentAtReconnect);
+  const second = await subscribe(client, channel, remainingAfterReconnect, { scenario: id, timeoutMs });
+
+  const [sentPubSub, receivedAfterReconnect] = await Promise.all([sentPromise, second.done]);
+  await second.unsubscribe();
+
+  const receivedPubSub = receivedBeforeFailure + receivedAfterReconnect;
+  const elapsed = ((Date.now() - wallStart) / 1000).toFixed(2);
+
+  console.log(`[Pub/Sub] Concluído — ${sentPubSub} enviadas | ${receivedPubSub} recebidas | ${lost} perdidas | ${elapsed}s`);
+
+  return {
+    sent: sentPubSub,
+    received: receivedPubSub,
+    elapsed,
+    lost,
+    redelivered: 0,
+    failureWindow: `${scenario.failureAt}s–${scenario.failureAt + scenario.failureDuration}s`,
+    receivedBeforeFailure,
+    receivedAfterReconnect,
+    sentAtDisconnect,
+    sentAtReconnect,
+  };
+}
+
 // Publisher coroutine for multi-publisher Pub/Sub.
 // Each publisher gets a static, non-overlapping slice of totalMessages — no
 // coordination needed between publishers, mirroring the P2P producer side.
@@ -470,11 +552,15 @@ function printSummary(results) {
     }
 
     const loss = (((r.sent - r.received) / r.sent) * 100).toFixed(1);
-    // C5 (simulateFailure): surface redelivered/pendingFinal alongside the usual loss
-    // line — "perda" stays the sent-vs-received discrepancy check, unrelated to lost.
-    const failureSuffix = r.redelivered !== undefined
-      ? ` | redelivered: ${r.redelivered} | pendingFinal: ${r.pendingFinal}`
-      : '';
+    // C5 (simulateFailure): surface redelivered/pendingFinal (P2P) or lost/redelivered
+    // (Pub/Sub) alongside the usual loss line — "perda" stays the sent-vs-received
+    // discrepancy check, unrelated to the explicit lost/redelivered counters.
+    let failureSuffix = '';
+    if (r.pendingFinal !== undefined) {
+      failureSuffix = ` | redelivered: ${r.redelivered} | pendingFinal: ${r.pendingFinal}`;
+    } else if (r.failureWindow !== undefined) {
+      failureSuffix = ` | lost: ${r.lost} | redelivered: ${r.redelivered}`;
+    }
     console.log(`${label} | ${r.sent} env | ${r.received} rec | perda: ${loss}%${failureSuffix} | ${r.elapsed}s`);
 
     if (r.producers) {
@@ -495,6 +581,11 @@ function printSummary(results) {
     }
     if (r.recoveredMessages) {
       console.log(`         recuperadas via XAUTOCLAIM: ${r.recoveredMessages}`);
+    }
+    if (r.failureWindow !== undefined) {
+      console.log(`         falha simulada: ${r.failureWindow}`);
+      console.log(`         antes da falha: ${r.receivedBeforeFailure} msgs recebidas`);
+      console.log(`         após reconexão: ${r.receivedAfterReconnect} msgs recebidas`);
     }
   }
 
