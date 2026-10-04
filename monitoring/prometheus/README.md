@@ -17,9 +17,9 @@ O arquivo de configuração é `monitoring/prometheus/prometheus.yml`.
 | Job | Target | Status atual |
 |-----|--------|--------------|
 | `prometheus` | `localhost:9090` | Ativo |
-| `nodejs-app` | `host.docker.internal:3001` | **DOWN** (esperado nesta fase) |
+| `nodejs-app` | `host.docker.internal:3001` | **UP** |
 
-> O target `nodejs-app` ficará com status **DOWN** no Prometheus enquanto a aplicação Node.js não implementar o endpoint `/metrics` via `prom-client`. Esse comportamento é esperado e não indica erro de configuração.
+> O target `nodejs-app` fica **UP** assim que o processo Node.js (protótipo ou qualquer cenário `scenario:c1`–`scenario:c5`) sobe e expõe o endpoint `/metrics` via `prom-client` na porta `3001`. Se aparecer como DOWN, confirme que algum desses processos está em execução.
 
 ## Como subir
 
@@ -27,10 +27,10 @@ O arquivo de configuração é `monitoring/prometheus/prometheus.yml`.
 npm run docker:up
 ```
 
-## Métricas Coletadas (previstas)
+## Métricas Coletadas
 
-Consulte [`docs/metricas.md`](../../docs/metricas.md) para a lista completa de métricas planejadas.
+Consulte [`docs/metricas.md`](../../docs/metricas.md) para a lista completa de métricas implementadas e seu uso nos cenários C1–C5, e o [`README.md`](../../README.md) principal para os valores validados em cada cenário.
 
 ## Próximo passo
 
-Implementar o endpoint `/metrics` na aplicação Node.js (porta `3001`) usando `prom-client`.
+Configurar datasource e dashboards no Grafana (item ainda pendente, conforme o `README.md` principal).
