@@ -13,6 +13,7 @@
     "scenario:c3": "node src/load-runner/run.js c3-disseminacao-eventos",
     "scenario:c4": "node src/load-runner/run.js c4-alta-carga",
     "scenario:c5": "node src/load-runner/run.js c5-falha-consumidor",
+    "collect:percentiles": "node experiments/scripts/collect-percentiles.js",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"

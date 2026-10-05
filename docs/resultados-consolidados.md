@@ -10,7 +10,7 @@ Estado da consolidação, por categoria:
 
 - **Throughput e confiabilidade** (enviadas, recebidas, perda, `lost`, `redelivered`): **consolidados** — todos os cinco cenários têm números exatos documentados.
 - **Tempo decorrido e throughput real**: **consolidados**, mas com variação observada entre execuções repetidas em alguns cenários (ver seção 4 e seção 7).
-- **Percentis de latência (p50/p95/p99)**: **ainda não consolidados sistematicamente** — existem apenas 4 valores pontuais documentados em todo o projeto (C3 e C4), cobrindo uma fração pequena da matriz cenário × modelo × percentil. Ver seção 5.
+- **Percentis de latência (p50/p95/p99)**: **consolidados** — coletados em uma bateria automatizada oficial (`experiments/scripts/collect-percentiles.js`) para todos os 5 cenários e seus modelos aplicáveis, incluindo as 2 execuções do C4. Ver seção 5.
 - **CPU/memória**: confirmadas **fora do escopo final** do TCC (decisão já registrada em `docs/metricas.md`), não uma pendência de coleta.
 - **`tcc_queue_depth`**: métrica implementada no código, mas **nunca exercitada** em nenhum cenário — nenhum valor existe para consolidar.
 
@@ -68,14 +68,14 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 | Cenário | Modelo | p50 | p95 | p99 | Status |
 |---|---|---|---|---|---|
 | Protótipo | P2P / Pub/Sub | — | — | — | Não consolidado ainda (execução curta demais para `histogram_quantile`) |
-| C1 — Baseline | P2P | não consolidado ainda | não consolidado ainda | não consolidado ainda | Confirmado apenas que a query retorna valor não-`NaN`; valor numérico não registrado |
-| C1 — Baseline | Pub/Sub | não consolidado ainda | não consolidado ainda | não consolidado ainda | — |
-| C2 — Fila de Tarefas | P2P | não consolidado ainda | não consolidado ainda | não consolidado ainda | `histogram_quantile` retornou `NaN` na consulta pós-execução; latência média ≈2,53ms documentada separadamente (não é percentil) |
-| C3 — Disseminação de Eventos | Pub/Sub | não consolidado ainda | **≈6,4ms** | não consolidado ainda | Único percentil documentado do C3 |
-| C4 — Alta Carga | P2P | **≈0,54ms** | não consolidado ainda | **≈4,6ms** | — |
-| C4 — Alta Carga | Pub/Sub | **≈0,71ms** | não consolidado ainda | não consolidado ainda | — |
-| C5 — Falha de Consumidor | P2P | não consolidado ainda | não consolidado ainda | não consolidado ainda | Nenhuma consulta de percentil registrada nesta etapa |
-| C5 — Falha de Consumidor | Pub/Sub | não consolidado ainda | não consolidado ainda | não consolidado ainda | — |
+| C1 — Baseline | P2P | 2,962ms | 4,807ms | 4,971ms | Coleta automatizada oficial |
+| C1 — Baseline | Pub/Sub | 2,935ms | 4,793ms | 4,959ms | Coleta automatizada oficial |
+| C2 — Fila de Tarefas | P2P | 2,751ms | 4,785ms | 4,966ms | Coleta automatizada oficial |
+| C3 — Disseminação de Eventos | Pub/Sub | 2,715ms | 4,771ms | 4,954ms | Coleta automatizada oficial |
+| C4 — Alta Carga | P2P | 0,507–0,513ms | 0,963–0,974ms | 1,928–3,400ms | Coleta automatizada oficial; 2 execuções; valores em intervalo |
+| C4 — Alta Carga | Pub/Sub | 0,550–0,573ms | 2,790–3,429ms | 4,566–4,692ms | Coleta automatizada oficial; 2 execuções; valores em intervalo |
+| C5 — Falha de Consumidor | P2P | 2,728ms | 4,777ms | 4,959ms | Coleta automatizada oficial |
+| C5 — Falha de Consumidor | Pub/Sub | 2,136ms | 4,721ms | 4,951ms | Coleta automatizada oficial |
 
 ---
 
@@ -87,19 +87,16 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 - **Distribuição de carga** entre workers (C2: uniforme, 750×4) e entre workers no C5 (720/3779, desequilibrado pela falha) — evidencia o efeito da falha simulada.
 - **Tempo observado vs. nominal**, por cenário — evidencia overhead e a variância entre execuções já registrada na seção 4.
 - **Throughput real aproximado**, por cenário × modelo — usando os valores já calculados na seção 4.
-
-### Dependem de nova coleta
-
-- **p50/p95/p99 por cenário × modelo** — o gráfico comparativo central da monografia; hoje só tem 4 pontos de dado em toda a matriz.
-- **Degradação de latência C1 (baixa carga) vs. C4 (alta carga)** — falta inteiramente o lado C1.
-- **Comparação completa de latência entre P2P e Pub/Sub** em todos os cenários — bloqueada pela mesma lacuna.
+- **Latência p50/p95/p99 por cenário × modelo** — o gráfico comparativo central da monografia; matriz completa disponível na seção 5.
+- **Degradação de latência C1 (baixa carga) vs. C4 (alta carga)** — ambos os lados já têm dados (ex.: p50 P2P cai de ≈2,96ms no C1 para ≈0,51ms no C4).
+- **Comparação P2P vs. Pub/Sub**, onde aplicável, por cenário — todos os cenários com ambos os modelos (C1, C4, C5) já têm percentis dos dois lados.
 
 ---
 
 ## 7. Limitações Metodológicas
 
 - **Variação entre execuções repetidas:** o tempo decorrido de alguns cenários variou de forma não desprezível entre execuções distintas do mesmo cenário — notavelmente C4 P2P (101,08s–122,58s) e C4 Pub/Sub (129,39s–142,36s). Isso afeta diretamente o throughput real calculado na seção 4, que deve ser lido como aproximação, não como valor único e definitivo.
-- **Percentis de latência não foram coletados sistematicamente:** as poucas consultas de `histogram_quantile` realizadas até agora foram pontuais (durante validações específicas de C3 e C4), não uma bateria planejada para os 5 cenários.
+- **Os percentis foram coletados em uma bateria automatizada única** para C1, C2, C3 e C5, e duas execuções para C4. Não há repetições estatísticas amplas com média/desvio padrão.
 - **CPU/memória estão fora do escopo final** do TCC — decisão de escopo, não lacuna a preencher.
 - **`tcc_queue_depth` está implementada, mas não foi exercitada** em nenhum cenário até o momento.
 - **C3 tem `received` agregado maior que `sent`** por construção (fan-out com 4 subscribers) — a métrica de "perda" convencional (`sent - received`) não se aplica a esse cenário; a fidelidade de entrega do C3 já foi validada individualmente por subscriber (3000/3000 cada), não pelo agregado.
@@ -108,11 +105,10 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 
 ## 8. Próximos Passos
 
-1. Revisar este consolidado (conferir se os números batem com as fontes antes de usá-los na monografia).
-2. Planejar a coleta oficial de p50/p95/p99 — decidir se cada cenário será executado uma única vez ou múltiplas vezes, dada a variância já observada na seção 7.
-3. Reexecutar C1–C5, consultando as queries PromQL de percentil **durante** cada execução (evitando o problema de `NaN` pós-execução já documentado nos logs de C2/C3).
-4. Atualizar a tabela da seção 5 com os valores coletados.
-5. Gerar os gráficos listados na seção 6 a partir dos dados consolidados.
+1. Revisar a interpretação dos resultados consolidados (throughput, confiabilidade e latência) antes de usá-los na monografia.
+2. Gerar os gráficos listados na seção 6 a partir dos dados já consolidados.
+3. Decidir como incorporar os dados (tabelas, gráficos, ambos) na redação da monografia.
+4. Eventualmente criar a seção de análise comparativa P2P vs. Pub/Sub a partir deste consolidado.
 
 ---
 
@@ -123,3 +119,5 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 - [`docs/metricas.md`](metricas.md)
 
 Registros locais não versionados em `docs/implementation-log/` foram usados como apoio interno de auditoria e consolidação.
+
+A coleta automatizada foi registrada localmente em `experiments/results/percentis-automatizados.json` e `.md`, arquivos ignorados pelo Git por representarem resultado bruto de execução.
