@@ -79,17 +79,34 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 
 ---
 
-## 6. Gráficos Recomendados
+## 6. Gráficos
 
-### Já podem ser feitos com os dados atuais
+### Gráficos gerados
 
-- **Perda (%) no C5:** P2P 0% vs. Pub/Sub 21,3% — gráfico de barras simples, alto valor para a seção de confiabilidade.
+Os três gráficos essenciais já foram gerados a partir dos dados consolidados nas seções 3–5, via `experiments/scripts/generate-result-charts.js`:
+
+1. **[`docs/assets/resultados/throughput-efetivo.png`](assets/resultados/throughput-efetivo.png)**
+
+   ![Throughput efetivo por cenário e modelo](assets/resultados/throughput-efetivo.png)
+
+   Throughput efetivo (msg/s) por cenário e modelo, em dois painéis — baixa/média carga (C1, C2, C3, C5) e C4 isolado em escala própria, dada a diferença de ordem de grandeza — com intervalo min–max nas barras do C4.
+
+2. **[`docs/assets/resultados/latencia-p50-p95-p99.png`](assets/resultados/latencia-p50-p95-p99.png)**
+
+   ![Latência de entrega por cenário e modelo](assets/resultados/latencia-p50-p95-p99.png)
+
+   Latência p50/p95/p99 por cenário e modelo, em três painéis (um por percentil), com intervalo min–max para as duas execuções do C4.
+
+3. **[`docs/assets/resultados/confiabilidade-c5.png`](assets/resultados/confiabilidade-c5.png)**
+
+   ![Confiabilidade sob falha de consumidor — C5](assets/resultados/confiabilidade-c5.png)
+
+   Recebidas vs. perdidas por modelo no C5: P2P com 100% de entrega (reentrega única via `XAUTOCLAIM` anotada à parte, não contabilizada como perda) e Pub/Sub com os 960 perdidos (21,3%) durante a desconexão do subscriber.
+
+### Outras ideias, ainda não geradas
+
 - **Distribuição de carga** entre workers (C2: uniforme, 750×4) e entre workers no C5 (720/3779, desequilibrado pela falha) — evidencia o efeito da falha simulada.
 - **Tempo observado vs. nominal**, por cenário — evidencia overhead e a variância entre execuções já registrada na seção 4.
-- **Throughput real aproximado**, por cenário × modelo — usando os valores já calculados na seção 4.
-- **Latência p50/p95/p99 por cenário × modelo** — o gráfico comparativo central da monografia; matriz completa disponível na seção 5.
-- **Degradação de latência C1 (baixa carga) vs. C4 (alta carga)** — ambos os lados já têm dados (ex.: p50 P2P cai de ≈2,96ms no C1 para ≈0,51ms no C4).
-- **Comparação P2P vs. Pub/Sub**, onde aplicável, por cenário — todos os cenários com ambos os modelos (C1, C4, C5) já têm percentis dos dois lados.
 
 ---
 
@@ -105,10 +122,10 @@ Throughput real calculado como `enviadas ÷ tempo observado`. Para C3, o cálcul
 
 ## 8. Próximos Passos
 
-1. Revisar a interpretação dos resultados consolidados (throughput, confiabilidade e latência) antes de usá-los na monografia.
-2. Gerar os gráficos listados na seção 6 a partir dos dados já consolidados.
-3. Decidir como incorporar os dados (tabelas, gráficos, ambos) na redação da monografia.
-4. Eventualmente criar a seção de análise comparativa P2P vs. Pub/Sub a partir deste consolidado.
+1. Revisar a interpretação dos resultados consolidados antes de usá-los na monografia.
+2. Decidir quais tabelas e gráficos serão incorporados diretamente no texto final.
+3. Criar a seção de análise comparativa P2P vs. Pub/Sub a partir deste consolidado.
+4. Adaptar os gráficos/tabelas ao formato exigido pela instituição, se necessário.
 
 ---
 
